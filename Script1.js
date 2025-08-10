@@ -7,61 +7,10 @@ import { Connection, Keypair, } from '@solana/web3.js';
 import bs58 from 'bs58';
 import dotenv from 'dotenv';
 import https from 'https';
-import mysql from 'mysql2/promise';
+import { Pool } from 'pg';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-
-const db = mysql.createPool({
-    host: 'localhost',
-    user: 'root',
-    password: 'LFGB!!7771M!',
-    database: 'trading_bot_data',
-    waitForConnections: true,
-    connectionLimit: 10,
-    queueLimit: 0,
-});
-
-const COINS = [
-    { id: 'solana1', name: 'mother', poolId: 'HcPgh6B2yHNvT6JsEmkrHYT8pVHu9Xiaoxm4Mmn2ibWw', initialRSI: 60.04, rsiPeriod: 16, csvFile: 'bitcoin_data.csv', inputMint: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', outputMint: '3S8qX1MsMqRbiwKg2cQyx7nis1oHMgaCuc9c4VfvVdPN', initialMA50: 0.06781, initialMA200: 0.06856, decimals:9 },
-    { id: 'solana2', name: 'fwog', poolId: 'AB1eu2L1Jr3nfEft85AuD2zGksUbam1Kr8MR3uM2sjwt', initialRSI: 54.06, rsiPeriod: 16, csvFile: 'solana_data.csv', inputMint: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', outputMint: 'A8C3xuqscfmyLrte3VmTqrAq8kgMASius9AFNANwpump', initialMA50: 0.4162, initialMA200: 0.4267, decimals:9 },
-    { id: 'solana3', name: 'scf', poolId: '6USpEBbN94DUYLUi4a2wo3AZDCyozon1PLGYu27jzPkX', initialRSI: 56.34, rsiPeriod: 15, csvFile: 'ethereum_data.csv', inputMint: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', outputMint: 'GiG7Hr61RVm4CSUxJmgiCoySFQtdiwxtqf64MsRppump', initialMA50: 0.0465, initialMA200: 0.0321, decimals:9 },
-    { id: 'solana4', name: 'bert', poolId: 'BmsZE6TkZYskyS1PatPKRyyazGdxWFxdia4BuvLg9AgY', initialRSI: 36.16, rsiPeriod: 15, csvFile: 'another_coin_data.csv', inputMint: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', outputMint: '63LfDmNb3MQ8mw9MtZ2To9bEA2M71kZUUGq5tiJxcqj9', initialMA50: 0.1156, initialMA200: 0.1147, decimals:9 },
-    { id: 'solana5', name: 'giga', poolId: '4xxM4cdb6MEsCxM52xvYqkNbzvdeWWsPDZrBcTqVGUar', initialRSI: 59.16, rsiPeriod: 15, csvFile: 'another_coin_data.csv', inputMint: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', outputMint: '6ogzHhzdrQr9Pgv6hZ2MNze7UrzBMAFyBBWUYp1Fhitx', initialMA50: 0.05149, initialMA200: 0.04701, decimals:9 },
-];
-
-async function writeCoinsToDatabase() {
-    try {
-        for (const coin of COINS) {
-            try {
-                console.log(`Attempting to write coin to database: ${coin.name}`);
-                await db.execute(`
-                    INSERT INTO coins (id, name, pool_id, initial_rsi, rsi_period, inputMint, outputMint, initial_ma50, initial_ma200, decimals)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON DUPLICATE KEY UPDATE
-                    name = VALUES(name),
-                    pool_id = VALUES(pool_id),
-                    initial_rsi = VALUES(initial_rsi),
-                    rsi_period = VALUES(rsi_period),
-                    inputMint = VALUES(inputMint),
-                    outputMint = VALUES(outputMint),
-                    initial_ma50 = VALUES(initial_ma50),
-                    initial_ma200 = VALUES(initial_ma200),
-                    decimals = VALUES(decimals)
-                `, [
-                    coin.id, coin.name, coin.poolId, coin.initialRSI, coin.rsiPeriod, coin.inputMint, coin.outputMint,
-                    coin.initialMA50, coin.initialMA200, coin.decimals
-                ]);
-                console.log(`Successfully added coin: ${coin.name}`);
-            } catch (coinError) {
-                console.error(`Error adding coin ${coin.name} to database:`, coinError.message);
-            }
-        }
-        console.log('Coin data successfully written to the database.');
-    } catch (error) {
-        console.error('Unexpected error writing coin data to the database:', error.message);
-    }
-}
 
 const FETCH_INTERVAL = 12000;  // 12 seconds
 const SAVE_INTERVAL = 20000;   // 20 seconds
@@ -822,3 +771,4 @@ process.on('SIGINT', async () => {
 
 // Start the script by calling the main function
 main();
+
