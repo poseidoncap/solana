@@ -46,6 +46,87 @@ function delay(ms) {
 
 dotenv.config();
 
+// after dotenv.config()
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL, // or use PGHOST/PGUSER/etc
+  ssl: process.env.PGSSL === 'true' ? { rejectUnauthorized: false } : false,
+});
+
+type DbCoin = {
+  name: string;
+  poolId: string;
+  inputMint: string;
+  outputMint: string;
+  decimals: number;
+  initialRSI: number;
+  initialMA50: number;
+  initialMA200: number;
+  rsiPeriod: number;
+};
+
+async function loadCoinsFromDatabase(): Promise<DbCoin[]> {
+  const { rows } = await pool.query(`
+    SELECT
+      name,
+      pool_id        AS "poolId",
+      input_mint     AS "inputMint",
+      output_mint    AS "outputMint",
+      COALESCE(decimals, 9)            AS "decimals",
+      COALESCE(initial_rsi, 50)        AS "initialRSI",
+      COALESCE(initial_ma50, 0)        AS "initialMA50",
+      COALESCE(initial_ma200, 0)       AS "initialMA200",
+      COALESCE(rsi_period, 14)         AS "rsiPeriod"
+    FROM coins
+    WHERE enabled = TRUE
+    ORDER BY priority NULLS LAST, name;
+  `);
+  return rows;
+}
+
+// runtime container; no more export const coinData = COINS.map(...)
+let coinData: any[] = [];
+
+async function primeCoinData() {
+  const coins = await loadCoinsFromDatabase();
+  coinData = coins.map(coin => ({
+    ...coin,
+    priceHistory: [],
+    rsiHistory: [new Big(coin.initialRSI).toFixed(4)],
+    currentRSI: new Big(coin.initialRSI),
+    lastPrice: null as Big | null,
+    ma50: new Big(coin.initialMA50),
+    ma200: new Big(coin.initialMA200),
+    trades: [],
+    ma200CrossLog: [],
+    ma200CrossedAbove: false,
+    ma200CrossedBelow: false,
+    lastTrend: 'Neutral',
+    lastBuySignalTime: null,
+  }));
+}
+
+// runtime container; no more export const coinData = COINS.map(...)
+let coinData: any[] = [];
+
+async function primeCoinData() {
+  const coins = await loadCoinsFromDatabase();
+  coinData = coins.map(coin => ({
+    ...coin,
+    priceHistory: [],
+    rsiHistory: [new Big(coin.initialRSI).toFixed(4)],
+    currentRSI: new Big(coin.initialRSI),
+    lastPrice: null as Big | null,
+    ma50: new Big(coin.initialMA50),
+    ma200: new Big(coin.initialMA200),
+    trades: [],
+    ma200CrossLog: [],
+    ma200CrossedAbove: false,
+    ma200CrossedBelow: false,
+    lastTrend: 'Neutral',
+    lastBuySignalTime: null,
+  }));
+}
+
 // Initialize a connection to the Solana cluster
 const connection = new Connection('https://api.mainnet-beta.solana.com');
 const agent = new https.Agent({
@@ -161,79 +242,40 @@ async function checkWallet(walletPublicKey, solThreshold) {
     }
 }
 
-async function saveStopLossEvent(coin, price, condition) {
-    try {
-        await db.execute(`
-            INSERT INTO stop_loss_log (coin, timestamp, price, condition)
-            VALUES (?, NOW(), ?, ?)
-        `, [coin, price, condition]);
-        console.log(`Stop-loss event logged for ${coin}: ${condition}`);
-    } catch (error) {
-        console.error('Error saving stop-loss event to the database:', error.message);
-        throw error;
-    }
+async function saveStopLossEvent(coin: string, price: number, condition: string) {
+  await pool.query(
+    `INSERT INTO stop_loss_log (coin, ts, price, condition) VALUES ($1, NOW(), $2, $3)`,
+    [coin, price, condition]
+  );
 }
 
 async function countActiveBuyTradesFromDatabase() {
-    try {
-        const [rows] = await db.execute(`
-            SELECT COUNT(*) AS activeBuyCount
-            FROM trade_logs
-            WHERE action = 'BUY' AND status = 'active'
-        `);
-        return rows[0]?.activeBuyCount || 0;
-    } catch (error) {
-        console.error('Error counting active buy trades:', error.message);
-        throw error;
-    }
+  const { rows } = await pool.query(
+    `SELECT COUNT(*)::int AS "activeBuyCount"
+     FROM trade_logs
+     WHERE action = 'BUY' AND status = 'active'`
+  );
+  return rows[0]?.activeBuyCount ?? 0;
 }
 
 async function checkStopLossAndEnforceCooldown() {
-    try {
-        // Count recent stop-loss events
-        const [rows] = await db.execute(`
-            SELECT COUNT(*) AS stopLossCount
-            FROM stop_loss_log
-            WHERE timestamp > NOW() - INTERVAL 1 DAY
-        `);
+  const { rows } = await pool.query(
+    `SELECT COUNT(*)::int AS "stopLossCount"
+     FROM stop_loss_log
+     WHERE ts > NOW() - INTERVAL '1 day'`
+  );
+  const stopLossCount = rows[0]?.stopLossCount ?? 0;
 
-        const stopLossCount = rows[0]?.stopLossCount || 0;
+  const activeBuyTrades = await countActiveBuyTradesFromDatabase();
 
-        // Count active buy trades
-        const activeBuyTrades = await countActiveBuyTradesFromDatabase();
-
-        if (stopLossCount >= STOP_LOSS_LIMIT || activeBuyTrades >= MAX_ACTIVE_TRADES) {
-            console.log(
-                `Cooldown triggered: ${stopLossCount} stop-loss events or ${activeBuyTrades} active trades exceed limits.`
-            );
-
-            // Log the cooldown event for tracking
-            await saveStopLossEvent(
-                'ALL',
-                0,
-                `Cooldown triggered: ${stopLossCount} stop-loss or ${activeBuyTrades} active trades`
-            );
-
-            // Activate cooldown
-            buyCoolDownActive = true;
-            global.buySignalsEnabled = false;
-
-            // Set a timer to disable cooldown after the defined period
-            setTimeout(() => {
-                console.log("Cooldown period ended. Buy signals re-enabled.");
-                buyCoolDownActive = false;
-                global.buySignalsEnabled = true;
-            }, COOLDOWN_PERIOD);
-        } else {
-            console.log(
-                `Conditions within limits: ${stopLossCount}/${STOP_LOSS_LIMIT} stop-loss events, ${activeBuyTrades}/${MAX_ACTIVE_TRADES} active trades.`
-            );
-        }
-    } catch (error) {
-        console.error('Error in stop-loss and cooldown check:', error.message);
-        throw error;
-    }
+  if (stopLossCount >= STOP_LOSS_LIMIT || activeBuyTrades >= MAX_ACTIVE_TRADES) {
+    await saveStopLossEvent('ALL', 0, `Cooldown: ${stopLossCount} stop-loss / ${activeBuyTrades} active`);
+    buyCoolDownActive = true;
+    global.buySignalsEnabled = false;
+    setTimeout(() => { buyCoolDownActive = false; global.buySignalsEnabled = true; }, COOLDOWN_PERIOD);
+  }
 }
+
 
 // Initialize trading process
 initializeTrading();
@@ -350,43 +392,19 @@ async function generateBuySignal(coin) {
 }
 
 async function loadTradesFromDatabase() {
-    try {
-        const [rows] = await db.execute(`
-            SELECT coin, action, status, amount, price, timestamp
-            FROM trade_logs
-        `);
-        return rows.map(row => ({
-            coin: row.coin,
-            action: row.action,
-            status: row.status,
-            amount: parseFloat(row.amount),
-            price: parseFloat(row.price),
-            timestamp: row.timestamp
-        }));
-    } catch (error) {
-        console.error('Error loading trades from the database:', error.message);
-        return [];
-    }
+  const { rows } = await pool.query(
+    `SELECT coin, action, status, amount::float8 AS amount, price::float8 AS price, ts
+     FROM trade_logs`
+  );
+  return rows.map(r => ({ coin: r.coin, action: r.action, status: r.status, amount: r.amount, price: r.price, timestamp: r.ts }));
 }
 
-async function countActiveTrades(coinName) {
-    try {
-        const trades = await loadTradesFromDatabase();  // Load trades using the function we just defined
-
-        // Check if trades is an array
-        if (!Array.isArray(trades)) {
-            console.error('Error: trades is not an array');
-            return 0;  // Return 0 active trades in case of error
-        }
-
-        // Filter trades that match the coin name and are active
-        const activeTrades = trades.filter(trade => trade.coin === coinName && !trade.isClosed);
-
-        return activeTrades.length;  // Return the count of active trades
-    } catch (error) {
-        console.error(`Error counting active trades for ${coinName}: ${error.message}`);
-        return 0;  // Return 0 in case of error
-    }
+async function countActiveTrades(coinName: string) {
+  const { rows } = await pool.query(
+    `SELECT COUNT(*)::int AS n FROM trade_logs WHERE coin = $1 AND is_closed = FALSE`,
+    [coinName]
+  );
+  return rows[0]?.n ?? 0;
 }
 
 function convertToLamports(amountInSol) {
@@ -395,87 +413,39 @@ function convertToLamports(amountInSol) {
     return lamports;
 }
 
-export async function sendBuySignalToMaster(coin, trend = 'neutral') {
-    try {
-        const amountInSol = 0.00001;
-        const amountInLamports = convertToLamports(amountInSol);
-        const currentPrice = coin.lastPrice ? coin.lastPrice.toString() : null;
-
-        // Generate MySQL-compatible timestamp
-        const mysqlTimestamp = new Date().toISOString().slice(0, 19).replace('T', ' ');
-
-        const buySignal = {
-            coin: coin.name,
-            price: currentPrice,
-            rsi: new Big(coin.currentRSI).toFixed(2),
-            inputMint: coin.inputMint,
-            outputMint: coin.outputMint,
-            amount: amountInLamports.toString(),
-            timestamp: mysqlTimestamp, // Use MySQL-compatible format
-            trend: trend || coin.lastTrend || 'neutral'
-        };
-
-        // Insert the buy signal directly into the buy_signals table
-        await db.execute(`
-            INSERT INTO buy_signals (coin, price, rsi, inputMint, outputMint, amount, timestamp, trend)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        `, [
-            buySignal.coin,
-            buySignal.price,
-            buySignal.rsi,
-            buySignal.inputMint,
-            buySignal.outputMint,
-            buySignal.amount,
-            buySignal.timestamp, // Use MySQL-compatible timestamp
-            buySignal.trend
-        ]);
-
-        console.log(`Buy signal for ${coin.name} successfully saved to database.`);
-    } catch (error) {
-        console.error('Error saving buy signal to database:', error.message);
-    }
+export async function sendBuySignalToMaster(coin: any, trend = 'neutral') {
+  const amountInLamports = convertToLamports(0.00001);
+  const currentPrice = coin.lastPrice ? coin.lastPrice.toString() : null;
+  await pool.query(
+    `INSERT INTO buy_signals (coin, price, rsi, input_mint, output_mint, amount, ts, trend)
+     VALUES ($1, $2, $3, $4, $5, $6, NOW(), $7)`,
+    [
+      coin.name,
+      currentPrice,
+      new Big(coin.currentRSI).toFixed(2),
+      coin.inputMint,
+      coin.outputMint,
+      amountInLamports.toString(),
+      trend || coin.lastTrend || 'neutral',
+    ]
+  );
 }
 
-async function saveMA200Crossing(coin, direction) {
-    const { name: coinName, lastPrice, ma50, ma200, lastTrend, initialMA50, initialMA200 } = coin;
-    const mysqlTimestamp = new Date().toISOString().slice(0, 19).replace('T', ' ');
+async function saveMA200Crossing(coin: any, direction: 'above'|'below') {
+  const price = coin.lastPrice?.toString();
+  const ma50 = coin.ma50?.toString();
+  const ma200 = coin.ma200?.toString();
+  const trend = coin.lastTrend || 'Neutral';
 
-    // Validate and convert fields
-    if (!lastPrice || !ma50 || !ma200 || !initialMA50 || !initialMA200) {
-        console.error(`Missing values for ${coinName}.`, { lastPrice, ma50, ma200, initialMA50, initialMA200 });
-        return;
-    }
-
-    const price = lastPrice instanceof Big ? lastPrice.toFixed(5) : parseFloat(lastPrice).toFixed(5);
-    const ma50Value = ma50 instanceof Big ? ma50.toFixed(5) : parseFloat(ma50).toFixed(5);
-    const ma200Value = ma200 instanceof Big ? ma200.toFixed(5) : parseFloat(ma200).toFixed(5);
-    const initMA50 = initialMA50 instanceof Big ? initialMA50.toFixed(5) : parseFloat(initialMA50).toFixed(5);
-    const initMA200 = initialMA200 instanceof Big ? initialMA200.toFixed(5) : parseFloat(initialMA200).toFixed(5);
-
-    if ([price, ma50Value, ma200Value, initMA50, initMA200].some(value => isNaN(value))) {
-        console.error(`Invalid converted values for ${coinName}. Skipping save.`);
-        return;
-    }
-
-    try {
-        await db.execute(`
-            INSERT INTO ma200_cross_log (coin, timestamp, price, ma50, ma200, trend, direction, initial_ma50, initial_ma200)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON DUPLICATE KEY UPDATE
-            price = VALUES(price),
-            ma50 = VALUES(ma50),
-            ma200 = VALUES(ma200),
-            trend = VALUES(trend),
-            direction = VALUES(direction),
-            initial_ma50 = VALUES(initial_ma50),
-            initial_ma200 = VALUES(initial_ma200)
-        `, [coinName, mysqlTimestamp, price, ma50Value, ma200Value, lastTrend || 'Neutral', direction, initMA50, initMA200]);
-
-        console.log(`MA200 crossing log saved for ${coinName}.`);
-    } catch (error) {
-        console.error(`Error saving MA200 crossing log for ${coinName}:`, error.message);
-    }
+  await pool.query(
+    `INSERT INTO ma200_cross_log (coin, direction, ts, price, ma50, ma200, trend)
+     VALUES ($1, $2, NOW(), $3, $4, $5, $6)
+     ON CONFLICT (coin, direction)
+     DO UPDATE SET ts = EXCLUDED.ts, price = EXCLUDED.price, ma50 = EXCLUDED.ma50, ma200 = EXCLUDED.ma200, trend = EXCLUDED.trend`,
+    [coin.name, direction, price, ma50, ma200, trend]
+  );
 }
+
 
 async function trackMA200Crossing(coin) {
     const belowThreshold = coin.ma200.times(0.99);
@@ -502,13 +472,13 @@ async function trackMA200Crossing(coin) {
 
 
 // Updated saveCurrentPrice function to insert into the MySQL `current_prices` table
-async function saveCurrentPrice(coin) {
-    const { name: coinName, lastPrice } = coin;
-    await db.execute(`
-        INSERT INTO current_prices (coin, last_price, timestamp)
-        VALUES (?, ?, NOW())
-        ON DUPLICATE KEY UPDATE last_price = VALUES(last_price), timestamp = NOW()
-    `, [coinName, lastPrice.toString()]);
+async function saveCurrentPrice(coin: any) {
+  await pool.query(
+    `INSERT INTO current_prices (coin, last_price, ts)
+     VALUES ($1, $2, NOW())
+     ON CONFLICT (coin) DO UPDATE SET last_price = EXCLUDED.last_price, ts = NOW()`,
+    [coin.name, coin.lastPrice?.toString() ?? null]
+  );
 }
 
 async function fetchPrice(coin) {
@@ -717,31 +687,28 @@ async function loadMA200CrossLogsFromDatabase() {
     }
 }
 
-
 async function main() {
-    try {
-        console.log("Initializing database and loading configurations...");
+  try {
+    console.log("Init DB + load coins...");
+    await primeCoinData();
 
-        // Write initial coin data to the database
-        await writeCoinsToDatabase();
+    console.log("Loading trade data...");
+    const trades = await loadTradesFromDatabase();
+    console.log(`Loaded ${trades.length} trades.`);
 
-        // Load any pre-existing data from the database
-        console.log("Loading trade data...");
-        const trades = await loadTradesFromDatabase();
-        console.log(`Loaded ${trades.length} trades from the database.`);
+    console.log("Loading MA200 crossing logs...");
+    await loadMA200CrossLogsFromDatabase();
 
-        console.log("Loading MA200 crossing logs...");
-        await loadMA200CrossLogsFromDatabase();
+    console.log("Start price loop...");
+    await startFetchingPrices();
 
-        console.log("Starting price fetching and trading logic...");
-        await startFetchingPrices();
-
-        console.log("Trading bot successfully started.");
-    } catch (error) {
-        console.error("Critical error during initialization:", error.message);
-        process.exit(1); // Exit the script on failure
-    }
+    console.log("Bot started.");
+  } catch (err:any) {
+    console.error("Critical init error:", err.message);
+    process.exit(1);
+  }
 }
+
 
 // Function to start periodic price fetching and logging
 async function startFetchingPrices() {
@@ -749,8 +716,8 @@ async function startFetchingPrices() {
         await loadMA200CrossLogsFromDatabase();  // Ensure MA200 logs are preloaded
 
         for (const coin of coinData) {
-            setInterval(() => fetchPrice(coin), FETCH_INTERVAL);  // Fetch coin prices periodically
-        }
+          setInterval(() => fetchPrice(coin), FETCH_INTERVAL);
+    }
 
         setInterval(saveMA200CrossLogsToDatabase, SAVE_INTERVAL);  // Periodically save MA200 logs
         setInterval(exportCurrentPrices, SAVE_INTERVAL);           // Periodically export prices
