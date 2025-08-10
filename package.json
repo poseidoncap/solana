@@ -1,0 +1,26 @@
+{
+  "name": "solution2",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "Script1.js",
+  "scripts": {
+    "start": "node orchestrator.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "@project-serum/anchor": "^0.26.0",
+    "@solana/web3.js": "^1.95.3",
+    "axios": "^1.7.5",
+    "big.js": "^6.2.1",
+    "bs58": "^6.0.0",
+    "cross-fetch": "^4.0.0",
+    "dotenv": "^16.4.5",
+    "p-limit": "^6.1.0",
+    "pg": "^8.12.0",
+    "punycode": "^2.3.1",
+    "winston": "^3.14.2"
+  }
+}
